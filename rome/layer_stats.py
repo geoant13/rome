@@ -93,26 +93,34 @@ def layer_stats(
     """
 
     def get_ds():
-        raw_ds = load_dataset(
-            ds_name,
-            dict(wikitext="wikitext-103-raw-v1", wikipedia="20200501.en")[ds_name],
-        )
-        maxlen = model.config.n_positions
+        # Map logical dataset names to current HuggingFace repo/config identifiers.
+        # The old "wikipedia" script format is no longer supported by datasets >= 2.20;
+        # wikimedia/wikipedia uses the same content with a modern loader.
+        ds_hub = {
+            "wikitext":  ("wikitext",            "wikitext-103-raw-v1"),
+            "wikipedia": ("wikimedia/wikipedia",  "20231101.en"),
+        }
+        repo, config = ds_hub[ds_name]
+        raw_ds = load_dataset(repo, config)
+        maxlen = getattr(model.config, "n_positions", None) or getattr(model.config, "max_position_embeddings", 2048)
         if batch_tokens is not None and batch_tokens < maxlen:
             maxlen = batch_tokens
         return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
 
     # Continue with computation of statistics
-    batch_size = 100  # Examine this many dataset texts at once
-    npos = model.config.n_positions
+    # Reduced from 100 to fit Qwen3-32B forward activations alongside the 64 GB
+    # model weights on a 71 GiB MIG slice. Smaller batches → slower but feasible.
+    batch_size = 20
+    npos = getattr(model.config, "n_positions", None) or getattr(model.config, "max_position_embeddings", 2048)
+    npos_capped = min(npos, 1024)  # Cap at GPT-2-XL equivalent to avoid OOM on large-context models
     if batch_tokens is None:
-        batch_tokens = npos * 3  # Sort and divide into batches with this many tokens
+        batch_tokens = npos_capped * 3
     if precision is None:
         precision = "float64"
     dtype = getattr(torch, precision)
     size_suffix = "" if sample_size is None else f"_{sample_size}"
     if batch_tokens < npos:
-        size_suffix = "_t{batch_tokens}" + size_suffix
+        size_suffix = f"_t{batch_tokens}" + size_suffix
     if model_name is None:
         model_name = model.config._name_or_path.replace("/", "_")
 

@@ -49,7 +49,9 @@ def apply_rome_to_model(
                     assert i == 0
                     weights_copy[w_name] = w.detach().clone()
 
-                w[...] += upd_matrix
+                # fp32 accumulation to avoid fp16 overflow (see execute_rome).
+                w_dtype = w.dtype
+                w[...] = (w.float() + upd_matrix.float()).to(w_dtype)
 
         print(f"New weights successfully inserted into {list(deltas.keys())}")
 
@@ -117,8 +119,13 @@ def execute_rome(
             upd_matrix = left_vector.unsqueeze(1) @ right_vector.unsqueeze(0)
             upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
 
-            # Update model weights and record desired changes in `delta` variable
-            weights[weight_name][...] += upd_matrix
+            # Update model weights and record desired changes in `delta` variable.
+            # Do the add in fp32 then cast back to avoid fp16 overflow when
+            # |upd_matrix| has entries > 65504 (observed on Qwen3-8B).
+            w_dtype = weights[weight_name].dtype
+            weights[weight_name][...] = (
+                weights[weight_name].float() + upd_matrix.float()
+            ).to(w_dtype)
             deltas[weight_name] = (
                 left_vector.detach(),
                 right_vector.detach(),

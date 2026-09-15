@@ -32,7 +32,7 @@ def main():
     def parse_noise_rule(code):
         if code in ["m", "s"]:
             return code
-        elif re.match("^[uts][\d\.]+", code):
+        elif re.match(r"^[uts][\d\.]+", code):
             return code
         else:
             return float(code)
@@ -473,6 +473,7 @@ class ModelAndTokenizer:
             n
             for n, m in model.named_modules()
             if (re.match(r"^(transformer|gpt_neox)\.(h|layers)\.\d+$", n))
+            or (re.match(r"^model\.layers\.\d+$", n))  # Mistral, Llama, etc.
         ]
         self.num_layers = len(self.layer_names)
 
@@ -495,6 +496,13 @@ def layername(model, num, kind=None):
         if kind == "attn":
             kind = "attention"
         return f'gpt_neox.layers.{num}{"" if kind is None else "." + kind}'
+    if hasattr(model, "model"):
+        # Mistral, Llama, and other models with 'model' attribute
+        if kind == "embed":
+            return "model.embed_tokens"
+        if kind == "attn":
+            kind = "self_attn"
+        return f'model.layers.{num}{"" if kind is None else "." + kind}'
     assert False, "unknown transformer structure"
 
 
@@ -530,7 +538,7 @@ def plot_hidden_flow(
     plot_trace_heatmap(result, savepdf)
 
 
-def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=None):
+def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=None, normalize_layers=False):
     differences = result["scores"]
     low_score = result["low_score"]
     answer = result["answer"]
@@ -555,18 +563,40 @@ def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=
         )
         ax.invert_yaxis()
         ax.set_yticks([0.5 + i for i in range(len(differences))])
-        ax.set_xticks([0.5 + i for i in range(0, differences.shape[1] - 6, 5)])
-        ax.set_xticklabels(list(range(0, differences.shape[1] - 6, 5)))
+        
+        num_layers = differences.shape[1]
+        
+        if normalize_layers:
+            # Normalize x-axis to show Early/Mid/Late centered in their regions
+            tick_positions = [
+                num_layers * 0.165,  # Center of Early region (0-33%)
+                num_layers * 0.5,    # Center of Mid region (33-66%)
+                num_layers * 0.835   # Center of Late region (66-100%)
+            ]
+            tick_labels = ["Early", "Mid", "Late"]
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels(tick_labels)
+        else:
+            # Use absolute layer numbers
+            ax.set_xticks([0.5 + i for i in range(0, num_layers - 6, 5)])
+            ax.set_xticklabels(list(range(0, num_layers - 6, 5)))
+        
         ax.set_yticklabels(labels)
         if not modelname:
             modelname = "GPT"
         if not kind:
             ax.set_title("Impact of restoring state after corrupted input")
-            ax.set_xlabel(f"single restored layer within {modelname}")
+            if normalize_layers:
+                ax.set_xlabel(f"Layer Position within {modelname}")
+            else:
+                ax.set_xlabel(f"single restored layer within {modelname}")
         else:
             kindname = "MLP" if kind == "mlp" else "Attn"
             ax.set_title(f"Impact of restoring {kindname} after corrupted input")
-            ax.set_xlabel(f"center of interval of {window} restored {kindname} layers")
+            if normalize_layers:
+                ax.set_xlabel(f"Layer Position ({window}-layer window)")
+            else:
+                ax.set_xlabel(f"center of interval of {window} restored {kindname} layers")
         cb = plt.colorbar(h)
         if title is not None:
             ax.set_title(title)
@@ -615,7 +645,42 @@ def decode_tokens(tokenizer, token_array):
 def find_token_range(tokenizer, token_array, substring):
     toks = decode_tokens(tokenizer, token_array)
     whole_string = "".join(toks)
-    char_loc = whole_string.index(substring)
+    
+    # Try exact match first
+    if substring in whole_string:
+        char_loc = whole_string.index(substring)
+    else:
+        # Try case-insensitive match
+        whole_string_lower = whole_string.lower()
+        substring_lower = substring.lower()
+        if substring_lower in whole_string_lower:
+            char_loc = whole_string_lower.index(substring_lower)
+        else:
+            # Try without spaces or with different spacing
+            substring_no_space = substring.replace(" ", "")
+            whole_string_no_space = whole_string.replace(" ", "")
+            if substring_no_space in whole_string_no_space:
+                # Find in no-space version, then map back
+                char_loc_no_space = whole_string_no_space.index(substring_no_space)
+                # Count spaces before this location
+                char_loc = char_loc_no_space
+                for i, c in enumerate(whole_string):
+                    if i >= char_loc:
+                        break
+                    if c == " ":
+                        char_loc += 1
+            else:
+                # Last resort: try to find any part of the substring
+                words = substring.split()
+                if words and words[0] in whole_string:
+                    char_loc = whole_string.index(words[0])
+                else:
+                    # Debug: print what we're trying to match
+                    print(f"Warning: Could not find '{substring}' in '{whole_string}'")
+                    print(f"Tokens: {toks}")
+                    # Return a safe default (first token)
+                    return (0, 1)
+    
     loc = 0
     tok_start, tok_end = None, None
     for i, t in enumerate(toks):
@@ -625,6 +690,13 @@ def find_token_range(tokenizer, token_array, substring):
         if tok_end is None and loc >= char_loc + len(substring):
             tok_end = i + 1
             break
+    
+    # Ensure we have valid bounds
+    if tok_start is None:
+        tok_start = 0
+    if tok_end is None:
+        tok_end = len(toks)
+    
     return (tok_start, tok_end)
 
 

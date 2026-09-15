@@ -69,7 +69,8 @@ def compute_v(
     # Set up an optimization over a latent vector that, when output at the
     # rewrite layer, i.e. hypothesized fact lookup location, will induce the
     # target token to be predicted at the final layer.
-    delta = torch.zeros((model.config.n_embd,), requires_grad=True, device="cuda")
+    hidden_size = getattr(model.config, "n_embd", None) or getattr(model.config, "hidden_size", None)
+    delta = torch.zeros((hidden_size,), requires_grad=True, device="cuda")
     target_init, kl_distr_init = None, None
 
     # Inserts new "delta" variable at the appropriate part of the computation
@@ -178,12 +179,12 @@ def compute_v(
     )
 
     # Solving the linear system to compute the right vector
-    right_vector = (target - cur_output) / torch.dot(cur_input, left_vector)
+    right_vector = (target - cur_output) / torch.dot(cur_input.float(), left_vector)
     print(f"Delta norm: {(target - cur_output).norm().item()}")
     print(
         f"Change in target norm: {target_init.norm().item()} to {target.norm().item()} => {(target.norm() - target_init.norm()).item()}"
     )
-    print(f"Division Factor: {torch.dot(cur_input, left_vector).item()}")
+    print(f"Division Factor: {torch.dot(cur_input.float(), left_vector).item()}")
     print(f"Right vector norm: {right_vector.norm()}")
 
     return right_vector

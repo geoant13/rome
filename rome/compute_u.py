@@ -114,7 +114,7 @@ def compute_u(
             hparams.mom2_dataset,
             hparams.mom2_n_samples,
             hparams.mom2_dtype,
-        ) @ u.unsqueeze(1)
+        ) @ u.float().unsqueeze(1)
         u = u.squeeze()
 
     return u / u.norm()
